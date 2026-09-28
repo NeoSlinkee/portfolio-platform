@@ -1,0 +1,48 @@
+# OPTIONAL and manual only. Rolls a published image out to AKS using GitHub
+# OIDC (no stored cloud secrets). It is skipped unless you have created the
+# paid AKS stack in infra/terraform/aks and set the repository variables
+# AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, AKS_RESOURCE_GROUP
+# and AKS_CLUSTER_NAME. Nothing in this repo runs it automatically.
+
+name: Deploy to AKS (optional)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (a commit SHA published by CI)"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write # lets GitHub mint a short-lived OIDC token for Azure
+
+jobs:
+  deploy:
+    if: vars.AKS_CLUSTER_NAME != ''
+    runs-on: ubuntu-latest
+    environment: aks
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: azure/use-kubelogin@v1
+
+      - name: Get cluster credentials
+        run: |
+          az aks get-credentials -g "${{ vars.AKS_RESOURCE_GROUP }}" -n "${{ vars.AKS_CLUSTER_NAME }}" --overwrite-existing
+          kubelogin convert-kubeconfig -l azurecli
+
+      - name: Roll out image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/portfolio:${IMAGE_TAG}"
+          # The deploy identity may only write inside the portfolio namespace,
+          # so it updates the image; cluster-level setup is done once by
+          # scripts/bootstrap-aks.sh with admin rights.
+          kubectl -n portfolio set image deployment/portfolio "web=${image}"
+          kubectl -n portfolio rollout status deployment/portfolio --timeout=300s

@@ -1,0 +1,27 @@
+# Lightweight kube-prometheus-stack settings for a laptop-sized kind cluster.
+alertmanager:
+  enabled: false
+
+grafana:
+  adminPassword: portfolio-local # local-only demo credential, never used in the cloud
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      searchNamespace: ALL
+
+prometheus:
+  prometheusSpec:
+    retention: 2d
+    # Pick up ServiceMonitors/PrometheusRules from any namespace, not only
+    # ones labelled with this Helm release.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+
+# kind's control-plane components are not reachable for scraping.
+kubeEtcd: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeProxy: { enabled: false }

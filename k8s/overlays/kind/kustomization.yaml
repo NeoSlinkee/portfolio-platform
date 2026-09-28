@@ -1,0 +1,19 @@
+# Local / CI environment: kind cluster, image side-loaded with `kind load`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+patches:
+  - target: { kind: Ingress, name: portfolio }
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        # *.localtest.me is public DNS that always resolves to 127.0.0.1
+        value: portfolio.localtest.me
+
+images:
+  - name: portfolio
+    newName: ghcr.io/neoslinkee/portfolio
+    newTag: dev

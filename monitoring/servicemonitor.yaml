@@ -1,0 +1,12 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: portfolio
+  namespace: portfolio
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: portfolio
+  endpoints:
+    - port: metrics
+      interval: 15s

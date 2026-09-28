@@ -1,0 +1,29 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: portfolio
+  namespace: portfolio
+spec:
+  groups:
+    - name: portfolio.rules
+      rules:
+        - alert: PortfolioDown
+          expr: sum(nginx_up{namespace="portfolio"}) == 0 or absent(nginx_up{namespace="portfolio"})
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "Portfolio site is down"
+            description: "No nginx instance in namespace portfolio has reported healthy for 2 minutes."
+        - alert: PortfolioReplicasDegraded
+          expr: kube_deployment_status_replicas_available{namespace="portfolio",deployment="portfolio"} < 2
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Portfolio running with fewer than 2 replicas"
+            description: "Only {{ $value }} replica(s) available for 5 minutes; a node loss would cause downtime."
+        - alert: PortfolioPodRestarting
+          expr: increase(kube_pod_container_status_restarts_total{namespace="portfolio"}[15m]) > 3
+          labels: { severity: warning }
+          annotations:
+            summary: "Portfolio container restarting repeatedly"
+            description: "{{ $labels.pod }}/{{ $labels.container }} restarted more than 3 times in 15 minutes."

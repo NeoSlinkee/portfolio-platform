@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (git-ignored) only if you decide to run a paid demo.
+subscription_id                 = "00000000-0000-0000-0000-000000000000"
+location                        = "southafricanorth"
+api_server_authorized_ip_ranges = ["203.0.113.10/32"] # your public IP
+budget_alert_emails             = ["you@example.com"]
+budget_amount                   = 10

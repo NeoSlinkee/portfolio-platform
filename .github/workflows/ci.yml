@@ -1,0 +1,179 @@
+# Every push and pull request: lint and security-scan everything, build the
+# site image, spin up a real 3-node Kubernetes cluster (kind) inside the
+# runner, deploy to it and run end-to-end smoke tests. On main, publish the
+# tested image to GitHub Container Registry with an SBOM and provenance.
+#
+# Cost: R0. Public-repo Actions minutes and GHCR storage are free.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_REPO: NeoSlinkee/portfolio
+  KUSTOMIZE_VERSION: v5.6.0
+  KUBECONFORM_VERSION: v0.6.7
+  CHECKOV_VERSION: 3.3.20
+  INGRESS_NGINX_VERSION: controller-v1.12.1
+
+jobs:
+  lint:
+    name: Lint & security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize and kubeconform
+        run: |
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" | sudo tar xz -C /usr/local/bin
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" | sudo tar xz -C /usr/local/bin kubeconform
+
+      - name: Render overlays
+        run: |
+          mkdir -p rendered
+          for overlay in kind aks; do
+            kustomize build "k8s/overlays/$overlay" > "rendered/$overlay.yaml"
+          done
+
+      - name: Validate manifests against the Kubernetes API schema
+        run: |
+          kubeconform -strict -summary -kubernetes-version 1.32.0 \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered/*.yaml monitoring/servicemonitor.yaml monitoring/prometheusrule.yaml monitoring/grafana-dashboard.yaml
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: app/Dockerfile
+
+      - name: Lint shell scripts
+        run: shellcheck -x scripts/*.sh
+
+      - name: Security scan (checkov)
+        run: |
+          pip install --quiet "checkov==${CHECKOV_VERSION}"
+          checkov --compact --quiet --skip-download -d rendered --framework kubernetes
+          checkov --compact --quiet --skip-download -f app/Dockerfile --framework dockerfile
+
+  e2e:
+    name: Build image & test on Kubernetes
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the site source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.APP_REPO }}
+          path: portfolio
+
+      - name: Set image name (GHCR needs lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/portfolio:${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: portfolio
+          file: app/Dockerfile
+          build-contexts: platform=app
+          tags: ${{ env.IMAGE }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create kind cluster (1 control plane + 2 workers)
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: portfolio
+          config: cluster/kind-config.yaml
+
+      - name: Install ingress-nginx
+        run: |
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_NGINX_VERSION}/deploy/static/provider/kind/deploy.yaml"
+          kubectl -n ingress-nginx rollout status deployment/ingress-nginx-controller --timeout=180s
+
+      - name: Load image into the cluster
+        run: kind load docker-image "$IMAGE" --name portfolio
+
+      - name: Deploy and smoke test
+        run: |
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" | sudo tar xz -C /usr/local/bin
+          (cd k8s/overlays/kind && kustomize edit set image "portfolio=${IMAGE}")
+          ./scripts/deploy.sh kind
+
+      - name: Prove zero-downtime rollout and self-healing
+        run: |
+          # Kill a pod and confirm the Deployment replaces it while the site stays up.
+          victim="$(kubectl -n portfolio get pods -l app.kubernetes.io/name=portfolio -o jsonpath='{.items[0].metadata.name}')"
+          kubectl -n portfolio delete pod "$victim" --wait=false
+          for _ in $(seq 1 20); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: portfolio.localtest.me' http://localhost:8080/healthz)"
+            [[ "$code" == "200" ]] || { echo "site returned $code during pod loss"; exit 1; }
+            sleep 1
+          done
+          kubectl -n portfolio rollout status deployment/portfolio --timeout=120s
+          echo "Site stayed up while a pod was replaced."
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get all -A
+          kubectl -n portfolio describe pods
+          kubectl -n portfolio logs -l app.kubernetes.io/name=portfolio --all-containers --tail=100
+          kubectl get events -A --sort-by=.lastTimestamp | tail -50
+
+  publish:
+    name: Publish image to GHCR
+    needs: e2e
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.APP_REPO }}
+          path: portfolio
+
+      - name: Set image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/portfolio" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (reuses the tested layers from cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: portfolio
+          file: app/Dockerfile
+          build-contexts: platform=app
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha

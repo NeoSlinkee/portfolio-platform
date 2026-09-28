@@ -1,0 +1,34 @@
+# Azure (AKS) environment. Only used if you choose to run the optional,
+# paid AKS stack in infra/terraform/aks. CI validates it but never applies it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  - cluster-issuer.yaml
+
+patches:
+  - target: { kind: Ingress, name: portfolio }
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: k8s.maarsch.net
+      - op: add
+        path: /metadata/annotations
+        value:
+          cert-manager.io/cluster-issuer: letsencrypt
+      - op: add
+        path: /spec/tls
+        value:
+          - hosts: ["k8s.maarsch.net"]
+            secretName: portfolio-tls
+  - target: { kind: Deployment, name: portfolio }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/topologySpreadConstraints/0/whenUnsatisfiable
+        value: DoNotSchedule
+
+images:
+  - name: portfolio
+    newName: ghcr.io/neoslinkee/portfolio
+    newTag: 1.0.0 # CI replaces this with the commit-SHA image before deploying
