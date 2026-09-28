@@ -69,6 +69,17 @@ variable "budget_amount" {
   default     = 10
 }
 
+variable "budget_start_date" {
+  description = "First day of the month the budget starts (Azure requires the 1st of a month, RFC3339)."
+  type        = string
+  default     = "2026-10-01T00:00:00Z"
+
+  validation {
+    condition     = can(regex("^\\d{4}-\\d{2}-01T00:00:00Z$", var.budget_start_date))
+    error_message = "Use the first day of a month, e.g. 2026-10-01T00:00:00Z."
+  }
+}
+
 variable "budget_alert_emails" {
   description = "Addresses that receive budget alerts."
   type        = list(string)
