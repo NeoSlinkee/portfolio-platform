@@ -66,7 +66,7 @@ resource "azurerm_consumption_budget_resource_group" "this" {
   time_grain        = "Monthly"
 
   time_period {
-           start_date = var.budget_start_date
+    start_date = var.budget_start_date
   }
 
   dynamic "notification" {
